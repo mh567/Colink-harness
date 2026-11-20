@@ -27,7 +27,7 @@ from octop_harness.context_usage import (
     estimate_tokens,
     message_content_text,
 )
-from octop_harness.middleware.memory_recall import replay_recall_snapshots
+from octop_harness.middleware.memory_recall import project_memory_messages
 
 logger = logging.getLogger(__name__)
 
@@ -261,9 +261,10 @@ async def _persist_compact_event(
     thread_id: str,
 ) -> CompactResult:
     summary_msg = work_mw._build_new_messages_with_path(summary, file_path)[0]
+    projected, _ = project_memory_messages(to_summarize)
     removed_tokens = max(
         0,
-        conversation_tokens_from_messages(replay_recall_snapshots(to_summarize))
+        conversation_tokens_from_messages(projected)
         - estimate_tokens(message_content_text(getattr(summary_msg, "content", ""))),
     )
     new_event = {

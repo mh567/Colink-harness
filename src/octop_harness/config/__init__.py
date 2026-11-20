@@ -791,6 +791,8 @@ class HarnessAgentConfig:
 
     # —— Memory ——
     memory_enabled: bool = True
+    # Restrict agent-facing structured memory without changing its checkpointer.
+    memory_access_enabled: bool = True
     # Who may edit USER.md / MEMORY.md.
     # ``auto`` locks them while structured memory is on and opens them when it
     # is off. ``user`` keeps them owner-maintained. ``agent`` allows edits even
@@ -816,8 +818,7 @@ class HarnessAgentConfig:
     # into both.
     memory_aux_light_model: str | None = None
     memory_aux_heavy_model: str | None = None
-    # Read path: snapshot recall per user turn and replay it on API user-message
-    # copies. Disabling skips new recall; historical snapshots still replay.
+    # Read path: fetch current recall at the model boundary; never replay stored text.
     memory_recall_inject_enabled: bool = True
     # Write path: capture the user turn + assistant reply as L0 raw events
     # after each model call. Off-thread; never blocks the user.
@@ -1117,6 +1118,7 @@ class HarnessAgentConfig:
             "bootstrap_file": _path_to_str(self.bootstrap_file) if self.bootstrap_file else None,
             "bootstrap_marker": _path_to_str(self.bootstrap_marker) if self.bootstrap_marker else None,
             "memory_enabled": self.memory_enabled,
+            "memory_access_enabled": self.memory_access_enabled,
             "manual_document_policy": self.manual_document_policy,
             "memory_backend_config": (
                 dict(self.memory_backend_config) if self.memory_backend_config is not None else None

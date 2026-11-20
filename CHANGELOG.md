@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7.post1] - 2026-11-20
+
+### 修复
+
+- 模型续跑时查询当前记忆，不再重放检查点中的旧记忆结果；原始会话和检查点保持不变。
+
+### 新增
+
+- 可在启动时或运行中关闭结构化记忆访问，而不切换会话检查点。
+
 ## [1.0.7] - 2026-11-04
 
 ### 修复

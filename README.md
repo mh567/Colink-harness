@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://www.python.org/downloads/"><img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" /></a>
   <a href="https://github.com/TencentCloud/octop-harness/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <a href="https://pypi.org/project/octop-harness/"><img src="https://img.shields.io/pypi/v/octop-harness" alt="PyPI" /></a>
+  <a href="https://pypi.org/project/colink-harness/"><img src="https://img.shields.io/pypi/v/colink-harness" alt="PyPI" /></a>
   <a href="https://github.com/astral-sh/ruff"><img alt="Code Style: Ruff" src="https://img.shields.io/badge/code%20style-ruff-000000?logo=ruff&logoColor=white" /></a>
   <a href="https://github.com/TencentCloud/octop-harness"><img alt="GitHub stars" src="https://img.shields.io/github/stars/TencentCloud/octop-harness?style=social" /></a>
 </p>
@@ -103,9 +103,15 @@ octop-harness is a library (not an app) that turns deepagents into a deployable 
 - Eligible conversation content is captured as **L0 raw events**, then distilled asynchronously into **L2 atoms** (`AtomCard`s) and **L3 entity pages**. Runtime failures are excluded; normal troubleshooting knowledge and explicit remember requests remain eligible.
 - Model failures raise after retries; retry eligibility follows LangChain's defaults, with the existing retry budget and backoff settings. Callers must handle exceptions from `call()` / streaming. Checkpoints retain failed tasks without adding a synthetic assistant reply. Hosts display errors separately; automatic team failure notifications use `configurable.octop_memory_capture_exclude=true` to keep diagnostics out of memory.
 - Powered by the octop-memory middleware; memory travels with the workspace.
-- Recall is frozen once per user turn and appended to the model-facing user message,
-  keeping the system prompt stable. Checkpoints preserve recall snapshots for exact
-  replay while chat history and capture retain the original user text.
+- Structured recall is looked up again for the current model request, including
+  continuations and resumes. Old recall bodies and memory tool results are not
+  replayed from a checkpoint. Memory-assisted replies remain in the conversation
+  archive but are not captured or replayed as long-term memory.
+- `memory_access_enabled` (default `True`) controls structured memory without
+  changing the saver or the conversation log. Hosts can update a running agent
+  with `HarnessAgent.set_memory_access(enabled)`. Pause new turns and drain
+  in-flight turns and background memory work before changing a live privacy
+  policy; the switch cannot retract a model request already sent.
 
 Memory extraction can be configured independently of main chat:
 `memory_extract_max_tokens` sets the candidate/episode output budget (default
@@ -212,10 +218,10 @@ Current release: **1.0.7**. See the [release notes](CHANGELOG.md).
 
 ```bash
 # Core SDK — agent runtime, model routing, tools, skills, backends
-pip install octop-harness
+pip install colink-harness
 
 # With the terminal CLI — interactive chat, config, skill management
-pip install octop-harness[cli]
+pip install colink-harness[cli]
 
 # Multiple extras — comma-separated inside one pair of brackets (quote for the shell):
 pip install 'octop-harness[object-storage,desktop]'

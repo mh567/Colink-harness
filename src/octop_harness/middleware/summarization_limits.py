@@ -17,6 +17,8 @@ from typing import Any
 
 from langchain_core.exceptions import ContextOverflowError
 
+from octop_harness.middleware.memory_recall import project_memory_messages
+
 logger = logging.getLogger(__name__)
 
 SUMMARY_INPUT_TOKEN_LIMIT = 8000
@@ -47,15 +49,33 @@ def harden_summarization_middleware(mw: Any) -> Any:
     async_lock = asyncio.Lock()
 
     def _create_summary(messages: Any) -> str:
+        projected, _ = project_memory_messages(messages)
         with sync_lock:
-            return _summary_or_fallback(helper, orig_sync, messages)
+            return _summary_or_fallback(helper, orig_sync, projected)
 
     async def _acreate_summary(messages: Any) -> str:
+        projected, _ = project_memory_messages(messages)
         async with async_lock:
-            return await _asummary_or_fallback(helper, orig_async, messages)
+            return await _asummary_or_fallback(helper, orig_async, projected)
 
     mw._create_summary = _create_summary
     mw._acreate_summary = _acreate_summary
+
+    # DeepAgents exposes offloaded history to the model through file tools.
+    # Use the same projection without modifying the original saved messages.
+    offload: Callable[[Any, Any, str], str | None] = mw._offload_to_backend
+    aoffload: Callable[[Any, Any, str], Awaitable[str | None]] = mw._aoffload_to_backend
+
+    def _offload(backend: Any, messages: Any, session_id: str) -> str | None:
+        projected, _ = project_memory_messages(messages)
+        return offload(backend, projected, session_id)
+
+    async def _aoffload(backend: Any, messages: Any, session_id: str) -> str | None:
+        projected, _ = project_memory_messages(messages)
+        return await aoffload(backend, projected, session_id)
+
+    mw._offload_to_backend = _offload
+    mw._aoffload_to_backend = _aoffload
     return mw
 
 

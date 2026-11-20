@@ -266,6 +266,14 @@ class HarnessAgent:
         """Low-level structured memory instance for advanced inspection/debugging."""
         return self._memory_runtime.memory
 
+    def set_memory_access(self, enabled: bool) -> None:
+        """Gate structured memory in this runtime without replacing its checkpointer.
+
+        The host must drain already running turns and memory workers before
+        changing who can use the agent. This does not cancel dispatched work.
+        """
+        self._memory_runtime.set_access(enabled)
+
     def memory_maintenance_status(self) -> dict[str, Any] | None:
         """Slimming phase for host status APIs. ``None`` when memory is off."""
         middleware = self._memory_runtime.middleware
@@ -1590,9 +1598,7 @@ class HarnessAgent:
 
         chain.append(CheckpointTsMiddleware())
 
-        memory_mw = self._memory_runtime.build_middleware()
-        if memory_mw is not None:
-            chain.append(memory_mw)
+        chain.append(self._memory_runtime.build_middleware())
 
         if cfg.middleware:
             chain.extend(cfg.middleware)
@@ -1859,8 +1865,8 @@ class HarnessAgent:
                 harden_summarization_middleware,
             )
 
-            # Summarization wraps the memory middleware and sees clean state
-            # messages. Include their recall snapshots in its budget/keep math.
+            # Summarization wraps memory middleware. Exclude old memory
+            # copies from both the summary input and budget/keep math.
             kwargs.setdefault("token_counter", count_tokens_with_recall)
             # deepagents' factory leaves this unset, so compaction resends the
             # whole evicted history. Cap it before the summary model sees it.

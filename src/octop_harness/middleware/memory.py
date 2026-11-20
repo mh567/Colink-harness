@@ -2,17 +2,16 @@
 
 Hooks the langgraph model loop to:
 
-1. **Snapshot recalled snippets** on each new user message (``before_model``),
-   then replay them on API copies of messages (``wrap_model_call``). The system
-   prompt stays unchanged and checkpoints preserve earlier recall verbatim.
+1. **Recall live memory** for the current user message on model input copies.
+   Checkpoints retain the conversation, not a reusable copy of recalled text.
 2. **Capture the turn** as L0 raw events after each model call
    (``after_model``) through :class:`MemoryService.capture_turn` when
    a service is bound.
 3. **Append a daily JSONL log** under ``jsonl_dir`` for ops debugging.
 
 The MemoryService and JSONL sinks are independent; either can be used on
-its own. Capture runs on background threads; recall is synchronous before the
-first model call of a user turn, then reused through tool calls and resumes.
+its own. Capture runs on background threads; recall is evaluated again on
+tool continuations and resumes, so forgetting cannot revive an old result.
 
 Fail-soft: any IO / RPC error during write or recall is logged at
 ``WARNING`` and never raised.
@@ -20,6 +19,7 @@ Fail-soft: any IO / RPC error during write or recall is logged at
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -34,12 +34,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.tools import StructuredTool
 
+from octop_harness.builtin.tools.memory_tools import MEMORY_READ_TOOLS, MEMORY_SERVICE_READ, MEMORY_TOOLS
 from octop_harness.middleware.memory_recall import (
+    MEMORY_ASSISTED_KEY,
     has_recall_snapshot,
-    replay_recall_snapshots,
-    stamp_recall_snapshot,
+    project_memory_messages,
+    stamp_recall_marker,
 )
 
 # ~20MB at the default 4KB page size. Matches
@@ -66,7 +70,7 @@ def _review_pending_manual_documents(service: Any) -> None:
 
 
 if TYPE_CHECKING:
-    from langchain.agents.middleware.types import ModelRequest, ModelResponse
+    from langchain.agents.middleware.types import ModelRequest
     from octop_memory import MemoryService
 
 logger = logging.getLogger(__name__)
@@ -156,8 +160,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             the host lifecycle (``recall`` / ``capture_turn`` / ``extract``)
             on the read and write paths.
         recall_inject_enabled: When ``True`` and a service is bound, the
-            middleware snapshots recall once per new user message. API copies
-            append it to that message; historical snapshots always replay.
+            middleware fetches recall for the active user message only.
+        access_allowed: Live access policy shared with compiled memory tools.
         recall_limit: Per-turn recall snippet cap. Forwarded to
             :meth:`MemoryService.recall`.
         capture_enabled: When ``True`` and a service is bound, the middleware
@@ -192,6 +196,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         self,
         *,
         service: MemoryService | None = None,
+        access_allowed: Callable[[], bool] | None = None,
         recall_inject_enabled: bool = True,
         recall_limit: int = 5,
         capture_enabled: bool = True,
@@ -210,6 +215,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         if jsonl_enabled and jsonl_dir is None:
             raise ValueError("jsonl_dir must be set when jsonl_enabled=True")
         self._service = service
+        self._access_allowed = access_allowed
         self._recall_inject_enabled = recall_inject_enabled
         self._recall_limit = recall_limit
         self._capture_enabled = capture_enabled
@@ -294,29 +300,23 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
     # ------------------------------------------------------------------
 
     def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
-        """Snapshot the message count and persist recall before entering the model.
+        """Snapshot the message count and mark a new user message for live recall.
 
         Only a trailing user message can start fresh recall. Tool continuations
-        and legacy history are never retroactively filled with today's memories.
+        can refresh this message without trusting a stored recall body.
         LangGraph's add_messages reducer replaces the stamped message by ID.
         """
         try:
             messages = _extract_messages(state)
             self._cursors[threading.get_ident()] = len(messages)
             if (
-                self._service is not None
+                self._has_memory_access()
                 and self._recall_inject_enabled
                 and messages
                 and isinstance(messages[-1], HumanMessage)
                 and not has_recall_snapshot(messages[-1])
             ):
-                manual_context = {
-                    str(path).replace("\\", "/").rsplit("/", 1)[-1]: body
-                    for path, body in state.get("memory_contents", {}).items()
-                    if str(path).replace("\\", "/").rsplit("/", 1)[-1] in {"USER.md", "MEMORY.md"}
-                }
-                stamped = self._prepare_recall(messages[-1], runtime, manual_context=manual_context or None)
-                return {"messages": [stamped]}
+                return {"messages": [stamp_recall_marker(messages[-1])]}
         except Exception:  # pragma: no cover - never raise into the user turn; pylint: disable=broad-except
             logger.warning("MemoryMiddleware before_model failed", exc_info=True)
         return None
@@ -326,15 +326,71 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
-        """Replay durable recall on API message copies; preserve the system prompt."""
-        return handler(request.override(messages=replay_recall_snapshots(request.messages)))
+        """Project only currently authorized memory into model-facing copies."""
+        prepared, marker = self._model_request(request)
+        response = handler(prepared)
+        if marker is not None:
+            _mark_memory_assisted(response, marker)
+        return response
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
-        return await handler(request.override(messages=replay_recall_snapshots(request.messages)))
+        if self._has_memory_access():
+            prepared, marker = await asyncio.to_thread(self._model_request, request)
+        else:
+            prepared, marker = self._model_request(request)
+        response = await handler(prepared)
+        if marker is not None:
+            _mark_memory_assisted(response, marker)
+        return response
+
+    def _has_memory_access(self) -> bool:
+        return self._service is not None and (self._access_allowed is None or self._access_allowed())
+
+    def _model_request(self, request: ModelRequest) -> tuple[ModelRequest, str | None]:
+        allowed = self._has_memory_access()
+        tools = request.tools or []
+        read_tools = {
+            tool.name: tool
+            for tool in tools
+            if isinstance(tool, StructuredTool)
+            and tool.name in MEMORY_READ_TOOLS
+            and (tool.metadata or {}).get(MEMORY_SERVICE_READ) is True
+        }
+
+        def recall(message: HumanMessage) -> str:
+            contents = request.state.get("memory_contents")
+            manual_context = {
+                str(path).replace("\\", "/").rsplit("/", 1)[-1]: body
+                for path, body in (contents.items() if isinstance(contents, dict) else ())
+                if isinstance(body, str) and str(path).replace("\\", "/").rsplit("/", 1)[-1] in {"USER.md", "MEMORY.md"}
+            }
+            return self._recall(message, request.runtime, manual_context=manual_context or None)
+
+        def read_tool(name: str, args: dict[str, Any]) -> str | None:
+            tool = read_tools.get(name)
+            if tool is None or not self._has_memory_access() or self._maintenance_blocks_io():
+                return None
+            try:
+                result = tool.invoke(args)
+            except Exception:
+                logger.warning("Unable to refresh memory tool result", exc_info=True)
+                return None
+            return result if self._has_memory_access() and isinstance(result, str) else None
+
+        projected, marker = project_memory_messages(
+            request.messages,
+            recall=recall if allowed and self._recall_inject_enabled else None,
+            read_tool=read_tool if allowed else None,
+        )
+        if not self._has_memory_access():
+            if marker:
+                projected, marker = project_memory_messages(request.messages)
+            tools = [tool for tool in tools if getattr(tool, "name", None) not in MEMORY_TOOLS]
+        return request.override(messages=projected, tools=tools), marker
 
     def after_model(self, state: Any, runtime: Any) -> None:
         """Persist messages produced this turn to MemoryService and/or JSONL.
@@ -377,9 +433,10 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             visible = _filter_visible_messages(new_messages, trigger_user=trigger_user)
 
             if (
-                self._service is not None
+                self._has_memory_access()
                 and self._capture_enabled
                 and visible
+                and not any(message.additional_kwargs.get(MEMORY_ASSISTED_KEY) for message in visible)
                 and configurable.get("octop_memory_capture_exclude") is not True
             ):
                 if self._maintenance_blocks_io():
@@ -437,7 +494,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         required.
         """
         service = self._service
-        if service is None:
+        if service is None or not self._has_memory_access():
             return
 
         # A direct end_session supersedes any pending idle timer for this
@@ -493,10 +550,8 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
     # Read-path helper (recall injection)
     # ------------------------------------------------------------------
 
-    def _prepare_recall(
-        self, message: HumanMessage, runtime: Any, *, manual_context: dict[str, str] | None = None
-    ) -> HumanMessage:
-        """Freeze success, empty recall, maintenance skip, or failure for this turn."""
+    def _recall(self, message: HumanMessage, runtime: Any, *, manual_context: dict[str, str] | None = None) -> str:
+        """Read live memory without persisting the result in the graph."""
         rendered = ""
         try:
             query = _stringify_content(message.content).strip()
@@ -505,7 +560,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
             session_id = _opt_id(configurable, "session_id") or thread_id
             if self._maintenance_blocks_io():
                 logger.info("memory.recall skip: maintenance %s", self.maintenance_status()["phase"])
-            elif query:
+            elif query and self._has_memory_access():
                 assert self._service is not None  # gated by caller
                 context_options = {"manual_context": manual_context} if manual_context is not None else {}
                 result = self._service.recall(
@@ -521,7 +576,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
                 )
         except Exception:  # recall injection is best-effort; pylint: disable=broad-except
             logger.warning("MemoryMiddleware recall injection failed", exc_info=True)
-        return stamp_recall_snapshot(message, rendered)
+        return rendered if self._has_memory_access() else ""
 
     # ------------------------------------------------------------------
     # Write-path helpers
@@ -581,7 +636,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
         been quiet for that long. No-op when the watchdog is disabled or no
         service is bound.
         """
-        if self._extract_idle_seconds <= 0 or self._service is None:
+        if self._extract_idle_seconds <= 0 or not self._has_memory_access():
             return
         from octop_harness.observability.logging import current_log_agent_id
 
@@ -698,7 +753,7 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
 
     def _kick_manual_review(self, *, background: bool) -> None:
         service = self._service
-        if service is None or not callable(getattr(service, "review_new_memory", None)):
+        if not self._has_memory_access() or not callable(getattr(service, "review_new_memory", None)):
             return
         with self._background_condition:
             if background and (self._background_paused or self._background_shutdown):
@@ -724,13 +779,16 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
 
     def _run_manual_review(self, service: Any) -> None:
         try:
-            while True:
+            while self._has_memory_access():
                 _review_pending_manual_documents(service)
                 with self._manual_review_lock:
                     if not self._manual_review_again:
                         self._manual_review_running = False
                         return
                     self._manual_review_again = False
+            with self._manual_review_lock:
+                self._manual_review_running = False
+                self._manual_review_again = False
         except Exception:
             logger.warning("memory.manual_review failed", exc_info=True)
             with self._manual_review_lock:
@@ -739,13 +797,18 @@ class MemoryMiddleware(AgentMiddleware[Any, Any]):
 
     def _submit_background(self, fn: Callable[[], None], *, label: str, background: bool = True) -> bool:
         with self._background_condition:
-            if self._background_paused or self._background_shutdown:
+            if self._background_paused or self._background_shutdown or not self._has_memory_access():
                 return False
             self._background_active += 1
 
         def run() -> None:
             try:
-                fn()
+                if self._has_memory_access():
+                    fn()
+                elif label == "manual-review":
+                    with self._manual_review_lock:
+                        self._manual_review_running = False
+                        self._manual_review_again = False
             finally:
                 with self._background_condition:
                     self._background_active -= 1
@@ -1040,6 +1103,16 @@ def _extract_messages(state: Any) -> list[BaseMessage]:
     if isinstance(state, dict):
         return list(state.get("messages", []) or [])
     return list(getattr(state, "messages", []) or [])
+
+
+def _mark_memory_assisted(response: ModelResponse | ExtendedModelResponse | AIMessage, marker: str) -> None:
+    if isinstance(response, ExtendedModelResponse):
+        response = response.model_response
+    messages = [response] if isinstance(response, AIMessage) else getattr(response, "result", None)
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, AIMessage):
+                message.additional_kwargs[MEMORY_ASSISTED_KEY] = marker
 
 
 def _get_configurable(runtime: Any) -> dict[str, Any]:

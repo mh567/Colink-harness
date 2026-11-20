@@ -227,7 +227,7 @@ class TestConstruction:
         tmp_path: Path,
         mock_model_factory: Callable[[], Any],
     ) -> None:
-        """Disabling ordinary memory and JSONL keeps only workspace context."""
+        """Disabling memory and JSONL still projects old checkpoints safely."""
         cfg = HarnessAgentConfig(
             workspace_dir=tmp_path,
             backend={"type": "filesystem", "root_dir": str(tmp_path), "virtual_mode": False},
@@ -253,7 +253,9 @@ class TestConstruction:
             HarnessAgent(cfg)
 
         mw_classes = [type(m).__name__ for m in captured["middleware"]]
-        assert "HarnessMemoryMiddleware" not in [m.name for m in captured["middleware"]]
+        harness_memory = next(m for m in captured["middleware"] if m.name == "HarnessMemoryMiddleware")
+        assert harness_memory._service is None
+        assert harness_memory._jsonl_enabled is False
         assert "MemoryMiddleware" in [m.name for m in captured["middleware"]]
         assert "ModelRouterMiddleware" in mw_classes
         assert "SkillFilterMiddleware" in mw_classes

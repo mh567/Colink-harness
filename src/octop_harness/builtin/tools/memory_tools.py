@@ -24,6 +24,7 @@ crashing the agent turn or leaking a stack trace into the conversation.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from langchain_core.tools import StructuredTool, tool
@@ -32,9 +33,15 @@ if TYPE_CHECKING:
     from octop_memory import MemoryService
 
 logger = logging.getLogger(__name__)
+MEMORY_READ_TOOLS = frozenset({"memory_get", "memory_search"})
+MEMORY_TOOLS = MEMORY_READ_TOOLS | {"memory_save"}
+MEMORY_SERVICE_READ = "octop_memory_service_read"
+_ACCESS_DISABLED = "Structured memory is unavailable."
 
 
-def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
+def build_memory_tools(
+    service: MemoryService, *, access_allowed: Callable[[], bool] | None = None
+) -> list[StructuredTool]:
     """Build :class:`MemoryService`-backed LLM tools.
 
     Exposes recall and explicit persistence tools:
@@ -50,6 +57,7 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
 
     Args:
         service: A :class:`MemoryService` to bind the tools to.
+        access_allowed: Live access policy, checked even by already-compiled tools.
     """
 
     @tool
@@ -64,11 +72,15 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
             query: Natural-language search query.
             max_results: Cap on returned hits (default 5, max ~20).
         """
+        if access_allowed is not None and not access_allowed():
+            return _ACCESS_DISABLED
         try:
             result = service.search(query, max_results=max_results)
         except Exception as exc:  # pragma: no cover - storage / ranker / model fault; pylint: disable=broad-except
             logger.warning("memory_search failed: %s", exc, exc_info=True)
             return f"memory_search failed: {exc.__class__.__name__}"
+        if access_allowed is not None and not access_allowed():
+            return _ACCESS_DISABLED
         hits = result.get("hits", []) if isinstance(result, dict) else []
         if not hits:
             empty_reason = result.get("empty_reason") if isinstance(result, dict) else None
@@ -96,19 +108,21 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
             start: Optional 1-based line number to start at.
             lines: Optional number of lines to return.
         """
+        if access_allowed is not None and not access_allowed():
+            return _ACCESS_DISABLED
         try:
             result = service.get(path, start=start, lines=lines)
         except Exception as exc:  # pragma: no cover - storage / IO fault; pylint: disable=broad-except
             logger.warning("memory_get failed: %s", exc, exc_info=True)
             return f"memory_get failed: {exc.__class__.__name__}"
+        if access_allowed is not None and not access_allowed():
+            return _ACCESS_DISABLED
         if not isinstance(result, dict):
             return str(result)
         if result.get("error"):
             return f"memory_get error: {result.get('error')}"
         content = result.get("content")
-        if isinstance(content, str):
-            return content
-        return str(result)
+        return content if isinstance(content, str) else str(result)
 
     @tool
     def memory_save(content: str, topic: str | None = None) -> str:
@@ -123,6 +137,8 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
             content: The fact to remember, preserving its scope and qualifiers.
             topic: Optional topic used to organize the memory.
         """
+        if access_allowed is not None and not access_allowed():
+            return _ACCESS_DISABLED
         if not content.strip():
             return "memory_save failed: content is empty"
         try:
@@ -132,6 +148,7 @@ def build_memory_tools(service: MemoryService) -> list[StructuredTool]:
             return f"memory_save failed: {exc.__class__.__name__}"
         return "Memory saved to octop-memory."
 
+    memory_search.metadata = memory_get.metadata = {MEMORY_SERVICE_READ: True}
     return [memory_search, memory_get, memory_save]  # type: ignore[list-item]
 
 

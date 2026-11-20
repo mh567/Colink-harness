@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "octop-harness"
+name = "colink-harness"
 # Single source of truth for the package version (runtime reads via importlib.metadata).
-version = "1.0.7"
+version = "1.0.7.post1"
 description = "Production-grade Harness Agent built on top of LangChain Deep Agents."
 readme = "README.md"
 license = { text = "MIT" }
@@ -44,7 +44,7 @@ dependencies = [
     "markdownify>=0.13",
     # 1.0.3 exposes the background manual-document review API used by the
     # memory scheduler and fixes extraction batching and persisted cursors.
-    "octop-memory>=1.0.3",
+    "colink-memory>=1.0.3.post1",
     "octop-browser>=0.9.9",
     "langchain-mcp-adapters>=0.3.0",
     # mcp 2.x breaks langchain-mcp-adapters (RequestContext import); pin until adapters support it.
@@ -99,10 +99,10 @@ all = [  # library feature extras only; exclude cli — use [cli,all] when neede
 octop-harness = "octop_harness.cli.main:cli"
 
 [project.urls]
-Homepage = "https://github.com/TencentCloud/octop-harness"
-Repository = "https://github.com/TencentCloud/octop-harness"
-Issues = "https://github.com/TencentCloud/octop-harness/issues"
-Changelog = "https://github.com/TencentCloud/octop-harness/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/mh567/Colink-harness"
+Repository = "https://github.com/mh567/Colink-harness"
+Issues = "https://github.com/mh567/Colink-harness/issues"
+Changelog = "https://github.com/mh567/Colink-harness/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [

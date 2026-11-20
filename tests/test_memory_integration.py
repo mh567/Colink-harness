@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -43,6 +44,36 @@ def agent(cfg: HarnessAgentConfig) -> Iterator[HarnessAgent]:
 class TestMemoryIntegration:
     def test_agent_has_memory_property(self, agent: HarnessAgent) -> None:
         assert isinstance(agent.memory, Memory)
+
+    def test_live_memory_access_revokes_prebuilt_tools_without_replacing_checkpointer(
+        self, cfg: HarnessAgentConfig
+    ) -> None:
+        with (
+            patch("langchain_openai.ChatOpenAI", return_value=MagicMock()),
+            patch("deepagents.create_deep_agent", return_value=MagicMock()),
+            HarnessAgent(replace(cfg, checkpointer=None)) as agent,
+        ):
+            tools = {tool.name: tool for tool in agent._memory_runtime.build_tools()}
+            checkpointer = agent.checkpointer
+            agent.memory.create_atom("The preferred font is Garamond", entity_name="Fonts", kind="Preference")
+            assert "Garamond" in tools["memory_search"].invoke({"query": "Garamond"})
+
+            agent.set_memory_access(False)
+
+            assert agent.checkpointer is checkpointer
+            assert "Garamond" not in tools["memory_search"].invoke({"query": "Garamond"})
+            tools["memory_save"].invoke({"content": "The preferred font is Courier", "topic": "Fonts"})
+            assert not agent.memory.search_atoms("Courier")
+
+            agent.set_memory_access(True)
+            assert "Garamond" in tools["memory_search"].invoke({"query": "Garamond"})
+
+    def test_startup_memory_access_stays_off_after_config_round_trip(self, cfg: HarnessAgentConfig) -> None:
+        wire = cfg.to_dict()
+        wire["memory_access_enabled"] = False
+        reloaded = HarnessAgentConfig.from_dict(wire)
+
+        assert reloaded.to_dict()["memory_access_enabled"] is False
 
     def test_memory_tools_registered(self, cfg: HarnessAgentConfig) -> None:
         captured: dict[str, Any] = {}

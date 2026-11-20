@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-_DISTRIBUTION_NAME = "octop-harness"
+_DISTRIBUTION_NAME = "colink-harness"
 
 try:
     __version__ = version(_DISTRIBUTION_NAME)

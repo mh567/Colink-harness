@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://www.python.org/downloads/"><img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white" /></a>
   <a href="https://github.com/TencentCloud/octop-harness/blob/main/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" /></a>
-  <a href="https://pypi.org/project/octop-harness/"><img src="https://img.shields.io/pypi/v/octop-harness" alt="PyPI" /></a>
+  <a href="https://pypi.org/project/colink-harness/"><img src="https://img.shields.io/pypi/v/colink-harness" alt="PyPI" /></a>
   <a href="https://github.com/astral-sh/ruff"><img alt="Code Style: Ruff" src="https://img.shields.io/badge/code%20style-ruff-000000?logo=ruff&logoColor=white" /></a>
   <a href="https://github.com/TencentCloud/octop-harness"><img alt="GitHub stars" src="https://img.shields.io/github/stars/TencentCloud/octop-harness?style=social" /></a>
 </p>
@@ -104,6 +104,8 @@
 - 对话经采集策略过滤后记录为 **L0 原始事件**，再异步蒸馏为 **L2 原子**（`AtomCard`）与 **L3 实体页**。系统运行报错不进入记忆，正常排障经验和用户明确记忆请求仍可保存。
 - 模型重试耗尽后抛出异常；重试范围沿用 LangChain 默认判断，次数与退避参数保持原配置。调用方需处理 `call()` / 流式调用的异常；checkpoint 保留失败任务，不添加合成助手回复。宿主单独展示错误；团队自动失败通知设置 `configurable.octop_memory_capture_exclude=true`，避免诊断信息被采集为记忆。
 - 由 octop-memory 中间件驱动，记忆随工作区一同迁移。
+- 模型调用（包括续跑和恢复）重新查询当轮可用的结构化记忆，不重放旧检查点中的召回正文和记忆工具结果。引用记忆的回复保留在会话档案中，但不再作为长期记忆采集或送回模型。
+- `memory_access_enabled` 默认为 `True`。宿主可用 `HarnessAgent.set_memory_access(enabled)` 切换运行中 Agent 的结构化记忆访问，不影响会话日志及检查点。涉及隐私时，宿主应先暂停接收新任务，等待正在处理的任务和记忆后台工作结束；开关不能撤回已发出的模型请求。
 
 
 
@@ -150,10 +152,10 @@
 
 ```bash
 # 核心 SDK —— Agent 运行时、模型路由、工具、技能、后端
-pip install octop-harness
+pip install colink-harness
 
 # 附带终端 CLI —— 交互式对话、配置、技能管理
-pip install octop-harness[cli]
+pip install colink-harness[cli]
 
 # 多个 extras —— 同一对方括号内用逗号分隔（建议给 shell 加引号）：
 pip install 'octop-harness[object-storage,desktop]'

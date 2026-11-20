@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from langchain_core.exceptions import ContextOverflowError
@@ -43,7 +44,13 @@ def _middleware(
         _fail()
         return "summary"
 
-    return SimpleNamespace(_lc_helper=helper, _create_summary=_create, _acreate_summary=_acreate)
+    return SimpleNamespace(
+        _lc_helper=helper,
+        _create_summary=_create,
+        _acreate_summary=_acreate,
+        _offload_to_backend=Mock(),
+        _aoffload_to_backend=AsyncMock(),
+    )
 
 
 def test_caps_unset_summary_input() -> None:
