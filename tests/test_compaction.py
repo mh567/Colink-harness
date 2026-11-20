@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock, patch
 
 import pytest
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from octop_harness.backends import resolve_backend
 from octop_harness.compaction import (
@@ -18,7 +18,6 @@ from octop_harness.compaction import (
     force_compact_thread,
 )
 from octop_harness.context_usage import conversation_tokens_from_messages, estimate_tokens
-from octop_harness.middleware.memory_recall import replay_recall_snapshots, stamp_recall_snapshot
 
 
 def _long_thread(n: int = 12) -> list:
@@ -45,11 +44,8 @@ async def test_force_compact_nothing_when_too_short() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("recall", ["", "remember this detail " * 100])
-async def test_force_compact_updates_summarization_event(recall: str) -> None:
+async def test_force_compact_updates_summarization_event() -> None:
     messages = _long_thread(8)
-    if recall:
-        messages[0] = stamp_recall_snapshot(messages[0], recall)
     graph = MagicMock()
     graph.aget_state = AsyncMock(
         return_value=SimpleNamespace(values={"messages": messages, "_summarization_event": None})
@@ -110,11 +106,7 @@ async def test_force_compact_updates_summarization_event(recall: str) -> None:
     assert args[1]["_summarization_session_id"].startswith("session_")
     # Offloaded history minus the summary — what a stale context snapshot
     # should shed, since compaction makes no model call of its own.
-    expected = conversation_tokens_from_messages(replay_recall_snapshots(messages[:cutoff])) - estimate_tokens(
-        "summary"
-    )
-    if recall:
-        assert expected > conversation_tokens_from_messages(messages[:cutoff]) - estimate_tokens("summary")
+    expected = conversation_tokens_from_messages(messages[:cutoff]) - estimate_tokens("summary")
     assert result.removed_tokens == expected > 0
 
 
@@ -392,6 +384,11 @@ async def test_force_compact_real_middleware_writes_history_file(tmp_path) -> No
     ``session_id`` on ``_aoffload_to_backend``.
     """
     messages = _long_thread(8)
+    original_tool_result = ToolMessage("coffee is available", name="memory_get", tool_call_id="memory")
+    messages[1:1] = [
+        AIMessage("", tool_calls=[{"id": "memory", "name": "memory_get", "args": {"path": "atom/a.md"}}]),
+        original_tool_result,
+    ]
     graph = MagicMock()
     graph.aget_state = AsyncMock(return_value=SimpleNamespace(values={"messages": messages}))
     graph.aupdate_state = AsyncMock()
@@ -413,6 +410,8 @@ async def test_force_compact_real_middleware_writes_history_file(tmp_path) -> No
     text = hist.read_text(encoding="utf-8")
     assert "## Summarized at" in text
     assert "user-0" in text
+    assert "coffee is available" not in text
+    assert original_tool_result.content == "coffee is available"
 
 
 @pytest.mark.asyncio

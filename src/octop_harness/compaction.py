@@ -27,7 +27,7 @@ from octop_harness.context_usage import (
     estimate_tokens,
     message_content_text,
 )
-from octop_harness.middleware.memory_recall import replay_recall_snapshots
+from octop_harness.middleware.memory_recall import project_memory_messages
 
 logger = logging.getLogger(__name__)
 
@@ -117,16 +117,23 @@ def _build_force_summarization_middleware(model: Any, backend: Any) -> Any:
     )
 
     from octop_harness.middleware.memory_recall import count_tokens_with_recall
+    from octop_harness.middleware.summarization_limits import (
+        SUMMARY_INPUT_TOKEN_LIMIT,
+        harden_summarization_middleware,
+    )
 
     defaults = compute_summarization_defaults(model)
-    return SummarizationMiddleware(
-        model=model,
-        backend=backend,
-        # Auto-trigger unused for force; keep is intentionally tighter than auto.
-        trigger=defaults["trigger"],
-        keep=("messages", FORCE_KEEP_MESSAGES),
-        token_counter=count_tokens_with_recall,
-        truncate_args_settings=defaults.get("truncate_args_settings"),
+    return harden_summarization_middleware(
+        SummarizationMiddleware(
+            model=model,
+            backend=backend,
+            # Auto-trigger unused for force; keep is intentionally tighter than auto.
+            trigger=defaults["trigger"],
+            keep=("messages", FORCE_KEEP_MESSAGES),
+            token_counter=count_tokens_with_recall,
+            trim_tokens_to_summarize=SUMMARY_INPUT_TOKEN_LIMIT,
+            truncate_args_settings=defaults.get("truncate_args_settings"),
+        )
     )
 
 
@@ -254,9 +261,10 @@ async def _persist_compact_event(
     thread_id: str,
 ) -> CompactResult:
     summary_msg = work_mw._build_new_messages_with_path(summary, file_path)[0]
+    projected, _ = project_memory_messages(to_summarize)
     removed_tokens = max(
         0,
-        conversation_tokens_from_messages(replay_recall_snapshots(to_summarize))
+        conversation_tokens_from_messages(projected)
         - estimate_tokens(message_content_text(getattr(summary_msg, "content", ""))),
     )
     new_event = {

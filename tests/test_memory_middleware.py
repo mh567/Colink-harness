@@ -395,6 +395,7 @@ class TestIntervalExtract:
 
 class TestRecallInjectScope:
     def test_inject_forwards_session_and_thread(self, service: _SpyService) -> None:
+        from langchain.agents.middleware.types import ModelRequest
         from langchain_core.messages import HumanMessage
 
         mw = MemoryMiddleware(service=service, jsonl_enabled=False)  # type: ignore[arg-type]
@@ -404,6 +405,8 @@ class TestRecallInjectScope:
         }
         update = mw.before_model({"messages": [HumanMessage(content="what did we decide")]}, runtime)
         assert update is not None
+        request = ModelRequest(model=MagicMock(), messages=update["messages"], runtime=runtime)
+        mw.wrap_model_call(request, MagicMock())
         assert service.recall_calls == [
             {
                 "query": "what did we decide",
@@ -595,6 +598,23 @@ class TestIdleMaintenance:
             from octop_harness.middleware.memory import _MAINTENANCE_VACUUM_PAGES
 
             assert seen_pages == [_MAINTENANCE_VACUUM_PAGES]
+        finally:
+            mw.shutdown()
+
+    def test_schedule_manual_review_runs_one_background_batch(self, service: _SpyService) -> None:
+        seen: dict[str, int] = {}
+        done = threading.Event()
+
+        def review(*, max_atoms: int = 100) -> None:
+            seen["max_atoms"] = max_atoms
+            done.set()
+
+        service.review_new_memory = review  # type: ignore[attr-defined]
+        mw = MemoryMiddleware(service=service, jsonl_enabled=False, maintenance_interval_seconds=0)  # type: ignore[arg-type]
+        try:
+            mw.schedule_manual_review()
+            assert done.wait(2)
+            assert seen["max_atoms"] == 20
         finally:
             mw.shutdown()
 

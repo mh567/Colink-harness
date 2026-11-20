@@ -762,11 +762,13 @@ class HarnessAgentConfig:
     # Auto by default: every provider whose required env vars are set is
     # loaded. ``searchfree`` (zero-config) is always included. Accepted values:
     #   - ``"auto"`` / ``True`` (default): every provider whose required env
-    #     vars are set is loaded (tavily / brave / google / kimi / searchfree).
+    #     vars are set is loaded (tavily / brave / deepseek / google / kimi /
+    #     yuanbao / searchfree, plus ``you`` once ``YDC_API_KEY`` is set).
     #   - ``False``: no web-search tools loaded.
     #   - ``"all"``: every provider is loaded; the ones missing env vars
     #     return a plain-text error string when invoked.
-    #   - ``["tavily", "kimi"]``: an explicit list. Unknown names raise
+    #   - ``["you"]`` works without a key (free tier, 100 searches a day).
+    #   - ``["tavily", "deepseek"]``: an explicit list. Unknown names raise
     #     ``ValueError``; missing env vars raise ``RuntimeError`` so
     #     misconfiguration surfaces at agent construction time.
     web_search_tools: bool | Literal["auto", "all"] | Sequence[str] = "auto"
@@ -789,6 +791,13 @@ class HarnessAgentConfig:
 
     # —— Memory ——
     memory_enabled: bool = True
+    # Restrict agent-facing structured memory without changing its checkpointer.
+    memory_access_enabled: bool = True
+    # Who may edit USER.md / MEMORY.md.
+    # ``auto`` locks them while structured memory is on and opens them when it
+    # is off. ``user`` keeps them owner-maintained. ``agent`` allows edits even
+    # while structured memory is on.
+    manual_document_policy: Literal["auto", "user", "agent"] = "auto"
     memory_backend: str | dict[str, Any] | Any = "sqlite"
     memory_backend_config: dict[str, Any] | None = None  # backend-specific settings
     memory_jsonl_enabled: bool = True
@@ -809,8 +818,7 @@ class HarnessAgentConfig:
     # into both.
     memory_aux_light_model: str | None = None
     memory_aux_heavy_model: str | None = None
-    # Read path: snapshot recall per user turn and replay it on API user-message
-    # copies. Disabling skips new recall; historical snapshots still replay.
+    # Read path: fetch current recall at the model boundary; never replay stored text.
     memory_recall_inject_enabled: bool = True
     # Write path: capture the user turn + assistant reply as L0 raw events
     # after each model call. Off-thread; never blocks the user.
@@ -892,6 +900,10 @@ class HarnessAgentConfig:
         if self.memory_aux_extra_body is not None and not isinstance(self.memory_aux_extra_body, dict):
             raise ValueError("memory_aux_extra_body must be a dict when set")
 
+        if self.manual_document_policy not in ("auto", "user", "agent"):
+            raise ValueError(
+                f"manual_document_policy must be 'auto', 'user', or 'agent', got {self.manual_document_policy!r}",
+            )
         if self.language not in ("en", "zh"):
             raise ValueError(f"language must be 'en' or 'zh', got {self.language!r}")
         if self.tool_search_mode not in ("client", "native", "eager"):
@@ -1106,6 +1118,8 @@ class HarnessAgentConfig:
             "bootstrap_file": _path_to_str(self.bootstrap_file) if self.bootstrap_file else None,
             "bootstrap_marker": _path_to_str(self.bootstrap_marker) if self.bootstrap_marker else None,
             "memory_enabled": self.memory_enabled,
+            "memory_access_enabled": self.memory_access_enabled,
+            "manual_document_policy": self.manual_document_policy,
             "memory_backend_config": (
                 dict(self.memory_backend_config) if self.memory_backend_config is not None else None
             ),
